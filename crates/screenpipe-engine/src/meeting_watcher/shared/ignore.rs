@@ -133,18 +133,18 @@ pub(crate) fn url_without_query_or_fragment(url: &str) -> &str {
 /// Decide whether a browser window belongs to a meeting profile, given its page
 /// URL (when the browser exposes it) and window title.
 ///
-/// URL-first: when a URL is known, ONLY the URL is matched against
-/// `browser_url_patterns` (query/fragment stripped). Page titles are never
+/// URL-first: match a known URL against `browser_url_patterns`
+/// (query/fragment stripped). Page titles are never
 /// searched for URL patterns — titles carry arbitrary text (an Amazon listing
 /// for a "Meeting Owl … Certified for Microsoft Teams … Works with Zoom, Google
 /// Meet" camera, the jitsi-meet GitHub repo, or "meet - App on Amazon Appstore")
 /// and matching meeting patterns there produces phantom meetings (#4246).
 ///
 /// `browser_title_patterns` (anchored, see `browser_title_matches_pattern`) are
-/// a fallback used ONLY when no URL is available — e.g. Arc, which titles its
-/// window "Meet" but does not expose the tab URL via AXDocument. When a URL IS
-/// available and is not a meeting URL, the page title is not evidence of a
-/// meeting.
+/// a fallback when no URL is available, or when its parsed HTTP(S) host belongs
+/// to the profile. Slack huddles keep a `/client/` URL, so their title identifies
+/// a candidate for the required call-control scan, not proof of an active call.
+/// A known foreign URL always suppresses the title fallback.
 pub(crate) fn browser_window_matches_meeting(
     url: Option<&str>,
     title: Option<&str>,
@@ -160,20 +160,24 @@ pub(crate) fn browser_window_matches_meeting(
         {
             return true;
         }
-        // URL-first normally ends here: a known non-meeting URL suppresses the
-        // title. Exception: a URL on the meeting platform's OWN host with no
-        // meeting-specific path (e.g. Slack — browser huddles keep the tab at
-        // `app.slack.com/client/...`, never `/huddle`, so URL matching can
-        // never fire). On the platform's own host, a meeting-titled window is
-        // strong evidence; foreign hosts (amazon.com/...meet...) stay blocked
-        // by the #4246 rule.
-        if let Some(t) = title {
-            let url_on_profile_host = ids
-                .browser_url_patterns
-                .iter()
-                .filter_map(|p| p.split('/').next())
-                .filter(|host| host.contains('.'))
-                .any(|host| contains_at_domain_boundary(doc, host));
+        if let Some(t) = title.filter(|_| !ids.browser_title_patterns.is_empty()) {
+            // A hostname in a path, userinfo, query, or fragment is not the
+            // page's host. Only allow this fallback on the actual platform.
+            let url_on_profile_host = url::Url::parse(u).ok().is_some_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some_and(|host| {
+                        ids.browser_url_patterns
+                            .iter()
+                            .filter_map(|p| p.split('/').next())
+                            .filter(|p| p.contains('.') && !p.contains(' '))
+                            .any(|profile_host| {
+                                host.eq_ignore_ascii_case(profile_host)
+                                    || host
+                                        .strip_suffix(profile_host)
+                                        .is_some_and(|prefix| prefix.ends_with('.'))
+                            })
+                    })
+            });
             if url_on_profile_host {
                 let t_lower = t.to_lowercase();
                 return ids
@@ -263,7 +267,7 @@ pub(crate) fn windows_browser_title_match(
 /// - Anchored `browser_title_patterns` (see `browser_title_matches_pattern`):
 ///   consulted ONLY when the window exposes no page URL, mirroring the
 ///   URL-first rule of `browser_window_matches_meeting`, AND only when the
-///   title also carries a Google-Meet-code-shaped token (see
+///   Google Meet title also carries a meeting-code-shaped token (see
 ///   `title_contains_meeting_code`). This is what catches a Chrome/Edge Meet
 ///   pop-out titled "Meet – abc-defg-hij" (no AXDocument, no domain in the
 ///   title) without letting a page whose URL is known to be non-meeting
@@ -274,11 +278,8 @@ pub(crate) fn windows_browser_title_match(
 /// anchored-but-ordinary title ("Meet the Team - Acme", "Meet Kevin -
 /// YouTube", "Meet: quarterly planning") in any open browser window was
 /// enough live evidence to start a false meeting. Only the Google Meet
-/// profile declares `browser_title_patterns` today, and every real
-/// Chrome/Edge pop-out title embeds the meeting code, so requiring it costs
-/// no genuine detection. The mic-gated URL probe and DB-evidence paths
-/// (`browser_window_matches_meeting`) are unchanged, and non-Meet platforms
-/// keep their coverage via URL patterns and the Windows UIA path.
+/// pop-out title embeds the meeting code. Slack's title only identifies a
+/// candidate: its browser profile separately requires huddle call controls.
 // Only the macOS AX sweep calls this (plus the shared tests).
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn ax_window_matches_meeting(

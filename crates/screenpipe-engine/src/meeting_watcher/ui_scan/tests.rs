@@ -1114,6 +1114,35 @@ fn test_arc_slack_non_huddle_titles_not_detected() {
     ));
 }
 
+#[test]
+fn slack_title_fallback_checks_the_parsed_host() {
+    for url in [
+        "https://example.org/app.slack.com/client/T123/C456",
+        "https://app.slack.com@example.org/client/T123/C456",
+        "https://app.slack.com.example.org/client/T123/C456",
+        "https://notapp.slack.com/client/T123/C456",
+        "https://example.org/?next=https://app.slack.com/client/T123/C456",
+        "https://example.org/#app.slack.com/client/T123/C456",
+        "file:///app.slack.com/client/T123/C456",
+        "not a URL app.slack.com/client/T123/C456",
+    ] {
+        assert!(
+            !any_profile_matches(Some(url), Some("Huddles - workspace - Slack")),
+            "foreign or invalid URL must not enable the title fallback: {url}"
+        );
+    }
+    for url in [
+        "https://app.slack.com/client/T123/C456",
+        "https://APP.SLACK.COM:443/client/T123/C456?view=huddles#top",
+        "https://sub.app.slack.com/client/T123/C456",
+    ] {
+        assert!(any_profile_matches(
+            Some(url),
+            Some("Huddles - workspace - Slack")
+        ));
+    }
+}
+
 // ── State machine tests ────────────────────────────────────────────
 
 fn make_scan_result(app: &str, in_call: bool, signals: usize) -> ScanResult {
